@@ -84,6 +84,7 @@ benchmark_ms(double target_time_ms, int32_t num_iters_inner, Reset &&reset, F &&
 
 struct BenchmarkConfig {
     int32_t size_in;
+    bool compute_singular_vectors = false;
 };
 
 struct TestData {
@@ -102,12 +103,10 @@ enum class Phase {
 void run_config( Phase phase,
     BenchmarkConfig const &config) {
     auto size_in = config.size_in;
+    bool const sing_vectors = config.compute_singular_vectors;
 
-    if (phase==Phase::BENCHMARK){
-        printf("  %6d ", size_in);
-    }else{
-        printf("  %6d \n", size_in);
-    }
+    printf("  %6d  %3s%s", size_in, sing_vectors ? "yes" : "no",
+           phase == Phase::BENCHMARK ? " " : " \n");
  
     curandGenerator_t curandGen;
     CURAND_CHECK(curandCreateGenerator(&curandGen, CURAND_RNG_PSEUDO_DEFAULT));
@@ -115,8 +114,14 @@ void run_config( Phase phase,
 
     float *a_gpu;
     float *svdout;
+    float *u_gpu = nullptr;
+    float *vt_gpu = nullptr;
     CUDA_CHECK(cudaMalloc(&a_gpu, size_in * size_in * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&svdout, size_in * sizeof(float)));
+    if (sing_vectors) {
+        CUDA_CHECK(cudaMalloc(&u_gpu, size_in * size_in * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&vt_gpu, size_in * size_in * sizeof(float)));
+    }
     
     cusolverDnHandle_t cusolverH = nullptr;
     CUSOLVER_CHECK(cusolverDnCreate(&cusolverH));
@@ -135,13 +140,17 @@ void run_config( Phase phase,
             CURAND_CHECK(curandGenerateUniform(curandGen, a_gpu, size_in*size_in)); 
         },
         [&]() {
-            CUSOLVER_CHECK(cusolverDnSgesvd(
-                cusolverH,  'N',  'N',  size_in,   size_in,  a_gpu, size_in, svdout, nullptr, 
-                size_in,   nullptr,  size_in,   d_work,  lwork,   nullptr,  d_info  ));
+            int const ldu = sing_vectors ? size_in : 1, ldvt = sing_vectors ? size_in : 1;
+            CUSOLVER_CHECK(cusolverDnSgesvd(cusolverH, sing_vectors ? 'A' : 'N', sing_vectors ? 'A' : 'N',
+                size_in, size_in, a_gpu, size_in, svdout, u_gpu, ldu, vt_gpu, ldvt, d_work, lwork, nullptr, d_info));
         });
 
     CUDA_CHECK(cudaFree(a_gpu));
     CUDA_CHECK(cudaFree(svdout));
+    if (u_gpu)
+        CUDA_CHECK(cudaFree(u_gpu));
+    if (vt_gpu)
+        CUDA_CHECK(cudaFree(vt_gpu));
     CUDA_CHECK(cudaFree(d_work));
     CUDA_CHECK(cudaFree(d_info));
     CUSOLVER_CHECK(cusolverDnDestroy(cusolverH));
@@ -160,12 +169,14 @@ void run_all_configs(
     }else {
         printf("\n\n");
         printf(
-            "  %-6s  %-9s \n",
+            "  %-6s  %-3s  %-9s \n",
             "size_i",
+            "vec",
             "time (ms)");
         printf(
-            "  %-6s  %-9s  \n",
+            "  %-6s  %-3s  %-9s  \n",
             "------",
+            "---",
             "---------");
     }
     for (auto const &config : configs) {
@@ -176,21 +187,20 @@ void run_all_configs(
 
 
 
-int main(int argc, char **argv) {
-    std::string test_data_dir = ".";
-    std::vector<BenchmarkConfig> configs_test;
-    if (argc==1){
-        configs_test = std::vector<BenchmarkConfig>{
-            {{64},{128},{256},{512},{1024},{2048}, {4096}},
-        };
-    }else{
-        int n = std::stoi(argv[1]);
-        configs_test = std::vector<BenchmarkConfig>{
-            {n},
-        };
-    }
+int main() {
+    std::vector<BenchmarkConfig> const configs_test = {
+        {256, false},
+        {256, true},
+        {1024, false},
+        {1024, true},
+        {4096, false},
+        {4096, true},
+        {16384, false},
+        {16384, true},
+        {65536, false},
+    };
 
-    run_all_configs(Phase::WARMUP,  configs_test);
+    run_all_configs(Phase::WARMUP, configs_test);
     run_all_configs(Phase::BENCHMARK, configs_test);
 
     return 0;
